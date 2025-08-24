@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Set Python to use UTF-8 encoding for its standard streams.
+# This prevents UnicodeEncodeError on Windows when printing emojis.
+export PYTHONUTF8=1
+
 # --- Config ---------------------------------------------------------------
 RAW_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 INPUT="${INPUT:-$RAW_REPO/inbox/temp.txt}"
@@ -44,7 +48,11 @@ run "$CMD"
 
 AFTER=$(ls "$OUTDIR"/verse-*.txt 2>/dev/null | sort | tail -n1 || true)
 if [[ -z "$AFTER" || "$AFTER" == "$BEFORE" ]]; then
-  echo "ℹ️ No new verse created (likely dedup or empty input)."
+  echo "ℹ️ No new verse file was created."
+  if nonblank_file "$INPUT"; then
+    echo "  This is likely because the content in '$INPUT' is a duplicate of the last verse."
+    echo "  The data update and push steps will be skipped."
+  fi
   exit 0
 fi
 echo "✅ New verse: $(basename "$AFTER")"
