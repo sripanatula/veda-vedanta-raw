@@ -48,11 +48,7 @@ run "$CMD"
 
 AFTER=$(ls "$OUTDIR"/verse-*.txt 2>/dev/null | sort | tail -n1 || true)
 if [[ -z "$AFTER" || "$AFTER" == "$BEFORE" ]]; then
-  echo "ℹ️ No new verse file was created."
-  if nonblank_file "$INPUT"; then
-    echo "  This is likely because the content in '$INPUT' is a duplicate of the last verse."
-    echo "  The data update and push steps will be skipped."
-  fi
+  echo "ℹ️ No new verse created (likely dedup or empty input)."
   exit 0
 fi
 echo "✅ New verse: $(basename "$AFTER")"
