@@ -1,80 +1,88 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+#
+# publish_vishnu.sh - Full end-to-end publishing pipeline for a new Vishnu verse.
+#
+# This script automates the following process:
+# 1. Adds a new verse from the inbox/temp.txt file to the veda-vedanta-raw repo.
+# 2. Commits and pushes the new raw verse.
+# 3. Navigates to the veda-vedanta-data repo.
+# 4. Runs the processor to generate JSON from the new raw verse.
+# 5. Commits and pushes the new data.
+#
 
-# Set Python to use UTF-8 encoding for its standard streams.
-# This prevents UnicodeEncodeError on Windows when printing emojis.
-export PYTHONUTF8=1
+set -e # Exit immediately if a command exits with a non-zero status.
 
-# --- Config ---------------------------------------------------------------
-RAW_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-INPUT="${INPUT:-$RAW_REPO/inbox/temp.txt}"
-OUTDIR="${OUTDIR:-$RAW_REPO/raw_data/mvr/vishnu}"
-DATA_REPO="${DATA_REPO:-$RAW_REPO/../veda-vedanta-data}"
-BRANCH="${BRANCH:-main}"
-REMOTE="${REMOTE:-origin}"
+# --- Configuration ---
+# Get the directory of the currently executing script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+RAW_REPO_ROOT="$SCRIPT_DIR/.."
+DATA_REPO_ROOT="$RAW_REPO_ROOT/../veda-vedanta-data"
 
-AUTO=0
-DRY=0
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --auto) AUTO=1; shift ;;
-    --dry-run) DRY=1; shift ;;
-    *) shift ;;
-  esac
-done
+AUTO_PUSH=false
+if [[ "$1" == "--auto" ]]; then
+  AUTO_PUSH=true
+fi
 
-run() { echo "+ $*"; [[ $DRY -eq 1 ]] || eval "$@"; }
+echo "=== 1. Processing Raw Content (veda-vedanta-raw) ==="
+cd "$RAW_REPO_ROOT"
 
-nonblank_file() { grep -q '[^[:space:]]' "$1" 2>/dev/null; }
+# Run the python script in dry-run mode first to see what it plans to do.
+ADD_SCRIPT_OUTPUT=$(PYTHONIOENCODING=utf-8 python3 scripts/add_vishnu_verse.py --dedupe-last --dry-run)
 
-# --- Guards ---------------------------------------------------------------
-if [[ ! -f "$INPUT" ]] || ! nonblank_file "$INPUT"; then
-  echo "ℹ️ $INPUT is missing or whitespace-only. Nothing to do."
+echo "Python script plans to:"
+echo "$ADD_SCRIPT_OUTPUT"
+
+read -p "Do you want to proceed with creating this file? (y/N) " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Operation cancelled by user. Exiting."
+    exit 1
+fi
+
+# If confirmed, run the script for real to create the file and clear the inbox.
+PYTHONIOENCODING=utf-8 python3 scripts/add_vishnu_verse.py --dedupe-last --clear-input
+
+# --- Git Commit ---
+# The python script will have created/modified a file. Let's find it.
+# This is more robust. It asks for the status of the whole repo and then filters for the specific directory.
+CHANGED_FILE=$(git status --porcelain | grep "raw_data/mvr/vishnu/" | head -n 1 | awk '{print $2}')
+
+if [ -z "$CHANGED_FILE" ]; then
+  echo "No raw file changes detected by git. Exiting."
   exit 0
 fi
-[[ -d "$DATA_REPO" ]] || { echo "❌ DATA_REPO not found: $DATA_REPO"; exit 1; }
 
-# Remember the latest verse before we run Python
-BEFORE=$(ls "$OUTDIR"/verse-*.txt 2>/dev/null | sort | tail -n1 || true)
+echo "Staging file: $CHANGED_FILE"
+git add "$CHANGED_FILE"
 
-# --- 1) Create next verse in RAW repo -------------------------------------
-CMD="python3 \"$RAW_REPO/scripts/add_vishnu_verse.py\" \
-  --input \"$INPUT\" \
-  --outdir \"$OUTDIR\" \
-  --dedupe-last \
-  --clear-input"
-[[ $DRY -eq 1 ]] && CMD+=" --dry-run"
-run "$CMD"
+# Create a nice commit message from the filename
+FILENAME=$(basename "$CHANGED_FILE")
+COMMIT_MSG="feat: Add ${FILENAME%.*}" # Default to "feat: Add name-052"
 
-AFTER=$(ls "$OUTDIR"/verse-*.txt 2>/dev/null | sort | tail -n1 || true)
-if [[ -z "$AFTER" || "$AFTER" == "$BEFORE" ]]; then
-  echo "ℹ️ No new verse created (likely dedup or empty input)."
-  exit 0
-fi
-echo "✅ New verse: $(basename "$AFTER")"
-
-# --- 2) Update vv-data using existing parser ------------------------------
-cd "$DATA_REPO"
-run "python3 tools/update_from_raw.py"
-
-# --- 3) Commit & push vv-data --------------------------------------------
-CHANGES=$(git status --porcelain)
-if [[ -n "$CHANGES" ]]; then
-  run "git add -A"
-  run "git commit -m \"auto: update data for $(basename "$AFTER")\""
-else
-  echo "ℹ️ No uncommitted changes (parser may have committed already)."
+# Check if the file existed before this change to decide between "feat:" and "fix:"
+if git cat-file -e HEAD:"$CHANGED_FILE" 2>/dev/null; then
+    COMMIT_MSG="fix: Update ${FILENAME%.*}" # e.g. "fix: Update name-052"
 fi
 
-if [[ $AUTO -eq 1 ]]; then
-  run "git push \"$REMOTE\" \"$BRANCH\""
+git commit -m "$COMMIT_MSG"
+
+if [ "$AUTO_PUSH" = true ]; then
+  git push
+  echo "Pushed changes to veda-vedanta-raw."
 else
-  read -r -p "Push vv-data to $REMOTE/$BRANCH now? [Y/n] " ans
-  if [[ -z "${ans:-}" || "$ans" =~ ^[Yy]$ ]]; then
-    run "git push \"$REMOTE\" \"$BRANCH\""
-  else
-    echo "⏭️ Skipping push."
+  read -p "Push changes to veda-vedanta-raw? (y/N) " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    git push
   fi
 fi
 
-echo "🎉 Done."
+echo ""
+echo "=== 2. Generating Structured Data (veda-vedanta-data) ==="
+cd "$DATA_REPO_ROOT"
+
+# Run the update script, which will detect the new raw file and auto-commit/push
+python3 tools/update_from_raw.py --push
+
+echo ""
+echo "✅ Publish complete."
